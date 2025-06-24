@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+package audio_service;
+
+service AudioProcessing {
+    // 현재 구현: Unary RPC
+    rpc ProcessSTT(STTRequest) returns (STTResponse);
+    rpc ProcessTTS(TTSRequest) returns (TTSResponse);
+    
+    // 미래 구현: Streaming RPC (주석 처리)
+    // rpc StreamSTT(stream STTStreamRequest) returns (stream STTStreamResponse);
+    // rpc StreamTTS(stream TTSStreamRequest) returns (stream TTSStreamResponse);
+    
+    // 헬스 체크
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// === STT Messages ===
+message STTRequest {
+    bytes audio_data = 1;
+    AudioConfig config = 2;
+    string request_id = 3;
+}
+
+message STTResponse {
+    string transcription = 1;
+    float confidence = 2;
+    repeated WordInfo words = 3;
+    string request_id = 4;
+    ProcessingStats stats = 5;
+}
+
+// === TTS Messages ===
+message TTSRequest {
+    string text = 1;
+    VoiceConfig voice_config = 2;
+    string request_id = 3;
+}
+
+message TTSResponse {
+    bytes audio_data = 1;
+    AudioFormat format = 2;
+    string request_id = 3;
+    ProcessingStats stats = 4;
+}
+
+// === 스트리밍용 Messages (미래 확장) ===
+message STTStreamRequest {
+    oneof request {
+        AudioConfig config = 1;
+        bytes audio_chunk = 2;
+        bool end_stream = 3;
+    }
+    string request_id = 4;
+}
+
+message STTStreamResponse {
+    oneof response {
+        string partial_transcription = 1;
+        string final_transcription = 2;
+        ProcessingError error = 3;
+    }
+    string request_id = 4;
+    bool is_final = 5;
+}
+
+// === 공통 Messages ===
+message AudioConfig {
+    AudioEncoding encoding = 1;
+    int32 sample_rate = 2;
+    string language = 3;
+    bool enable_vad = 4;
+}
+
+message VoiceConfig {
+    string voice_id = 1;
+    float speed = 2;
+    float pitch = 3;
+    string language = 4;
+}
+
+message WordInfo {
+    string word = 1;
+    float start_time = 2;
+    float end_time = 3;
+    float confidence = 4;
+}
+
+message ProcessingStats {
+    float processing_time_ms = 1;
+    int64 audio_length_ms = 2;
+    string model_used = 3;
+}
+
+message ProcessingError {
+    string error_code = 1;
+    string message = 2;
+}
+
+enum AudioEncoding {
+    LINEAR16 = 0;
+    FLAC = 1;
+    OGG_OPUS = 2;
+    MP3 = 3;
+}
+
+enum AudioFormat {
+    WAV = 0;
+    MP3 = 1;
+    OGG = 2;
+}
+
+// === 헬스 체크 ===
+message HealthCheckRequest {
+    string service = 1;
+}
+
+message HealthCheckResponse {
+    enum ServingStatus {
+        UNKNOWN = 0;
+        SERVING = 1;
+        NOT_SERVING = 2;
+    }
+    ServingStatus status = 1;
+}

@@ -1,0 +1,63 @@
+
+version: '3.8'
+
+services:
+  huggingface-grpc-server:
+    build: .
+    ports:
+      - "50051:50051"
+    environment:
+      - USE_GPU=false  # true로 설정시 CUDA 사용
+      - STT_MODEL=openai/whisper-large-v3
+      - TTS_MODEL=microsoft/speecht5_tts
+      - DEVICE=cpu  # cuda 또는 cpu
+      - MODEL_CACHE_DIR=/app/models
+      - GRPC_PORT=50051
+      - MAX_WORKERS=4
+      - LOG_LEVEL=INFO
+    volumes:
+      - model_cache:/app/models  # 모델 캐시 볼륨
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+
+  # GPU 버전 (NVIDIA Docker 필요)
+  huggingface-grpc-server-gpu:
+    build: .
+    ports:
+      - "50052:50051"
+    environment:
+      - USE_GPU=true
+      - STT_MODEL=openai/whisper-large-v3
+      - TTS_MODEL=microsoft/speecht5_tts
+      - DEVICE=cuda
+      - MODEL_CACHE_DIR=/app/models
+      - GRPC_PORT=50051
+      - MAX_WORKERS=2  # GPU에서는 더 적은 워커
+      - LOG_LEVEL=INFO
+    volumes:
+      - model_cache:/app/models
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - gpu  # docker-compose --profile gpu up 으로 실행
+
+volumes:
+  model_cache:
+    driver: local

@@ -1,0 +1,43 @@
+# kidding/docker-compose.yaml
+version: '3.8'
+
+services:
+  webserver:
+    build: 
+      context: ./services/webserver
+    container_name: kidding-webserver
+    ports:
+      - "${WEBSERVER_PORT:-8001}:8000"
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - kidding-network
+
+  stt-server:
+    build:
+      context: ./services/STTserver
+    container_name: kidding-stt
+    ports:
+      - "${STT_PORT:-8002}:8000"
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - kidding-network
+
+  tts-server:
+    build:
+      context: ./services/TTSserver
+    container_name: kidding-tts
+    ports:
+      - "${TTS_PORT:-8003}:8000"
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - kidding-network
+
+networks:
+  kidding-network:
+    driver: bridge
