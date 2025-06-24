@@ -1,14 +1,24 @@
+/**
+ * 파일: frontend/js/session_manager.js
+ * 설명: 커넥션 풀을 사용한 세션 관리 클래스 (업데이트됨)
+ * 변경사항: 
+ * - 커넥션 풀 통합으로 즉시 녹음 시작
+ * - connecting 단계 제거
+ * - 1초 재연결 로직 제거, 각 녹음은 독립적 세션
+ */
 import { AudioProcessor } from './audio_processor.js';
+import { ConnectionPoolManager } from './connection_pool_manager.js';
 
 /**
  * 세션 클래스 - 개별 녹음 세션을 관리
  */
 class Session {
-    constructor(id, websocket) {
+    constructor(id, connection) {
         this.id = id;
-        this.websocket = websocket;
+        this.connection = connection;
+        this.websocket = connection.websocket;
         this.audioProcessor = null;
-        this.status = 'connecting'; // connecting, connected, recording, waiting_reconnect, processing, playing, completed, error
+        this.status = 'ready'; // ready, recording, processing, playing, completed, error
         this.createdAt = Date.now();
     }
     
@@ -20,22 +30,6 @@ class Session {
         this.audioProcessor = new AudioProcessor();
         await this.audioProcessor.start(onDataCallback);
         this.status = 'recording';
-    }
-    
-    /**
-     * 녹음 재개
-     */
-    resumeRecording() {
-        if (this.audioProcessor) {
-            this.status = 'recording';
-        }
-    }
-    
-    /**
-     * 녹음 일시정지
-     */
-    pauseRecording() {
-        this.status = 'waiting_reconnect';
     }
     
     /**
@@ -57,11 +51,6 @@ class Session {
             this.audioProcessor.stop();
             this.audioProcessor = null;
         }
-        
-        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-            this.websocket.close();
-        }
-        
         this.status = 'completed';
     }
     
@@ -87,44 +76,88 @@ class Session {
 }
 
 /**
- * 세션 매니저 - 여러 세션을 관리하는 클래스
+ * 세션 매니저 - 커넥션 풀을 사용한 세션 관리
  */
 class SessionManager {
     constructor() {
         this.sessions = new Map();
         this.sessionCounter = 0;
         this.currentSession = null;
-        this.reconnectTimer = null;
-        this.lastReleaseTime = 0;
-        this.RECONNECT_THRESHOLD = 1000; // 1초
+        this.connectionPool = new ConnectionPoolManager(3); // 3개 커넥션 풀
+        this.finalizationTimer = null;
+        this.FINALIZATION_DELAY = 1000; // 1초
         
         // 이벤트 핸들러들
         this.onSessionUpdate = null;
         this.onAudioReceived = null;
         this.onSessionError = null;
+        this.onPoolStatusChange = null;
+        
+        // 커넥션 풀 이벤트 설정
+        this.setupConnectionPoolEvents();
     }
     
     /**
-     * 새 세션 생성
+     * 세션 매니저 초기화
+     */
+    async initialize() {
+        console.log('🚀 SessionManager 초기화 시작...');
+        await this.connectionPool.initialize();
+        console.log('✅ SessionManager 초기화 완료');
+    }
+    
+    /**
+     * 커넥션 풀 이벤트 설정
+     */
+    setupConnectionPoolEvents() {
+        this.connectionPool.onPoolStatusChange = (status) => {
+            if (this.onPoolStatusChange) {
+                this.onPoolStatusChange(status);
+            }
+        };
+    }
+    
+    /**
+     * 새 세션 생성 및 즉시 녹음 시작
      * @returns {Promise<number>} 세션 ID
      */
-    async createSession() {
+    async createSessionAndStartRecording() {
+        // 커넥션 풀에서 사용 가능한 커넥션 가져오기
+        const connection = this.connectionPool.assignConnectionToSession(`temp_${Date.now()}`);
+        if (!connection) {
+            throw new Error('사용 가능한 커넥션이 없습니다. 잠시 후 다시 시도해주세요.');
+        }
+        
         const sessionId = ++this.sessionCounter;
         
+        // 임시 세션 ID를 실제 세션 ID로 업데이트
+        this.connectionPool.busyConnections.delete(`temp_${Date.now()}`);
+        connection.sessionId = sessionId;
+        this.connectionPool.busyConnections.set(sessionId, connection);
+        
+        const session = new Session(sessionId, connection);
+        this.sessions.set(sessionId, session);
+        this.currentSession = sessionId;
+        
+        this.setupWebSocketHandlers(session);
+        
         try {
-            const ws = new WebSocket('ws://localhost:8000/ws/audio');
-            ws.binaryType = 'arraybuffer';
+            // 세션 시작 메시지 전송
+            session.sendMessage({
+                type: 'session_start',
+                session_id: sessionId,
+                timestamp: Date.now()
+            });
             
-            const session = new Session(sessionId, ws);
-            this.sessions.set(sessionId, session);
-            this.currentSession = sessionId;
+            // 즉시 녹음 시작
+            await this.startRecording(session);
             
-            this.setupWebSocketHandlers(session);
-            
+            console.log(`✅ 세션 생성 및 녹음 시작: ${sessionId}`);
             return sessionId;
             
         } catch (error) {
             console.error(`❌ 세션 생성 실패 (${sessionId}):`, error);
+            this.cleanupSession(sessionId);
             throw error;
         }
     }
@@ -136,20 +169,7 @@ class SessionManager {
     setupWebSocketHandlers(session) {
         const ws = session.websocket;
         
-        ws.onopen = async () => {
-            console.log(`✅ WebSocket 연결됨 (세션: ${session.id})`);
-            session.status = 'connected';
-            
-            // 세션 시작 메시지 전송
-            session.sendMessage({
-                type: 'session_start',
-                session_id: session.id,
-                timestamp: Date.now()
-            });
-            
-            await this.startRecording(session);
-            this.notifySessionUpdate(session);
-        };
+        // 이미 연결된 상태이므로 onopen은 호출되지 않음
         
         ws.onmessage = (event) => {
             this.handleWebSocketMessage(session, event);
@@ -193,64 +213,12 @@ class SessionManager {
     }
     
     /**
-     * 현재 세션 일시정지
+     * 현재 세션 녹음 중지
      */
-    pauseCurrentSession() {
+    stopCurrentSessionRecording() {
         if (this.currentSession) {
             const session = this.sessions.get(this.currentSession);
             if (session && session.status === 'recording') {
-                session.pauseRecording();
-                this.notifySessionUpdate(session);
-                
-                // 재연결 타이머 설정
-                this.reconnectTimer = setTimeout(() => {
-                    this.finalizeCurrentSession();
-                }, this.RECONNECT_THRESHOLD);
-                
-                console.log(`⏸️ 세션 일시정지 (세션: ${session.id})`);
-            }
-        }
-    }
-    
-    /**
-     * 현재 세션 재개 또는 새 세션 시작
-     */
-    async resumeOrStartSession() {
-        const now = Date.now();
-        const timeSinceLastRelease = now - this.lastReleaseTime;
-        
-        // 1초 이내에 다시 눌렀고 현재 세션이 대기 중이면 재개
-        if (timeSinceLastRelease < this.RECONNECT_THRESHOLD && this.currentSession) {
-            const session = this.sessions.get(this.currentSession);
-            if (session && session.status === 'waiting_reconnect') {
-                this.clearReconnectTimer();
-                session.resumeRecording();
-                
-                // 재개 신호 전송
-                session.sendMessage({
-                    type: 'recording_resumed',
-                    session_id: session.id,
-                    timestamp: Date.now()
-                });
-                
-                this.notifySessionUpdate(session);
-                console.log(`🔄 세션 재개 (세션: ${session.id})`);
-                return session.id;
-            }
-        }
-        
-        // 새 세션 시작
-        return await this.createSession();
-    }
-    
-    /**
-     * 현재 세션 완료 처리
-     */
-    finalizeCurrentSession() {
-        if (this.currentSession) {
-            const session = this.sessions.get(this.currentSession);
-            if (session) {
-                this.clearReconnectTimer();
                 session.stopRecording();
                 
                 // 완료 신호 전송
@@ -260,11 +228,44 @@ class SessionManager {
                     timestamp: Date.now()
                 });
                 
-                this.currentSession = null;
                 this.notifySessionUpdate(session);
-                console.log(`⏹️ 세션 완료 (세션: ${session.id})`);
+                console.log(`⏹️ 세션 녹음 중지 (세션: ${session.id})`);
+                
+                // 1초 후 세션 완료 처리 타이머 설정
+                this.finalizationTimer = setTimeout(() => {
+                    this.finalizeSession(session.id);
+                }, this.FINALIZATION_DELAY);
             }
         }
+    }
+    
+    /**
+     * 세션 완료 처리
+     * @param {number} sessionId 
+     */
+    finalizeSession(sessionId) {
+        const session = this.sessions.get(sessionId);
+        if (session) {
+            this.currentSession = null;
+            this.clearFinalizationTimer();
+            
+            // 커넥션은 서버에서 오디오 응답을 받은 후 자동으로 종료됨
+            console.log(`⏹️ 세션 완료 처리 (세션: ${sessionId})`);
+        }
+    }
+    
+    /**
+     * 새 녹음 시작 (기존 세션이 있으면 즉시 완료 처리)
+     */
+    async startNewRecording() {
+        // 기존 세션이 있으면 즉시 완료 처리
+        if (this.currentSession) {
+            this.clearFinalizationTimer();
+            this.finalizeSession(this.currentSession);
+        }
+        
+        // 새 세션 시작
+        return await this.createSessionAndStartRecording();
     }
     
     /**
@@ -312,7 +313,7 @@ class SessionManager {
                 this.currentSession = null;
             }
             
-            this.clearReconnectTimer();
+            this.clearFinalizationTimer();
             this.notifySessionUpdate(session);
             
             if (this.onSessionError) {
@@ -335,13 +336,16 @@ class SessionManager {
                 this.currentSession = null;
             }
             
+            // 커넥션 풀로 커넥션 반환
+            this.connectionPool.releaseConnection(sessionId);
+            
             console.log(`🧹 세션 정리 완료 (세션: ${sessionId})`);
             this.notifySessionUpdate(null);
         }
     }
     
     /**
-     * 세션 완료 처리
+     * 세션 완료 처리 (오디오 재생 후)
      * @param {number} sessionId 
      */
     completeSession(sessionId) {
@@ -358,12 +362,12 @@ class SessionManager {
     }
     
     /**
-     * 재연결 타이머 정리
+     * 완료 타이머 정리
      */
-    clearReconnectTimer() {
-        if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = null;
+    clearFinalizationTimer() {
+        if (this.finalizationTimer) {
+            clearTimeout(this.finalizationTimer);
+            this.finalizationTimer = null;
         }
     }
     
@@ -378,10 +382,20 @@ class SessionManager {
     }
     
     /**
-     * 마지막 릴리즈 시간 설정
+     * 새 녹음 가능 여부 확인
+     * @returns {boolean}
      */
-    setLastReleaseTime() {
-        this.lastReleaseTime = Date.now();
+    canStartNewRecording() {
+        const poolStatus = this.connectionPool.getPoolStatus();
+        return poolStatus.canAcceptNewSession;
+    }
+    
+    /**
+     * 커넥션 풀 상태 반환
+     * @returns {Object}
+     */
+    getPoolStatus() {
+        return this.connectionPool.getPoolStatus();
     }
     
     /**
@@ -400,6 +414,25 @@ class SessionManager {
     getSessionCountByStatus(status) {
         return Array.from(this.sessions.values())
             .filter(session => session.status === status).length;
+    }
+    
+    /**
+     * 전체 정리
+     */
+    destroy() {
+        console.log('🧹 SessionManager 정리 중...');
+        
+        this.clearFinalizationTimer();
+        
+        // 모든 세션 정리
+        this.sessions.forEach((session, sessionId) => {
+            this.cleanupSession(sessionId);
+        });
+        
+        // 커넥션 풀 정리
+        this.connectionPool.destroy();
+        
+        console.log('✅ SessionManager 정리 완료');
     }
 }
 

@@ -1,5 +1,11 @@
 /**
- * UI 상태 관리 및 업데이트를 담당하는 클래스
+ * 파일: frontend/js/ui_manager.js
+ * 설명: UI 상태 관리 및 업데이트를 담당하는 클래스 (업데이트됨)
+ * 변경사항:
+ * - 고정 버튼 크기 지원
+ * - 커넥션 풀 상태 표시 기능 추가
+ * - connecting 상태 제거, ready/recording/disabled 상태만 사용
+ * - 풀 고갈 시 버튼 자동 비활성화
  */
 class UIManager {
     constructor() {
@@ -28,13 +34,15 @@ class UIManager {
             voiceStatus: document.getElementById('voiceStatus'),
             ttsStatus: document.getElementById('ttsStatus'),
             connCount: document.getElementById('connCount'),
-            uptime: document.getElementById('uptime')
+            uptime: document.getElementById('uptime'),
+            poolAvailable: document.getElementById('poolAvailable'),
+            poolBusy: document.getElementById('poolBusy')
         };
     }
     
     /**
      * 버튼 상태 업데이트
-     * @param {string} state - ready, connecting, recording, waiting
+     * @param {string} state - ready, recording, disabled
      */
     updateButtonState(state) {
         const { voiceBtn, buttonText, buttonWave } = this.elements;
@@ -45,21 +53,21 @@ class UIManager {
         
         switch (state) {
             case 'ready':
+                voiceBtn.disabled = false;
                 buttonText.textContent = 'Press to doubt';
                 break;
                 
-            case 'connecting':
-                buttonText.textContent = 'Connecting...';
-                break;
-                
             case 'recording':
+                voiceBtn.disabled = false;
                 voiceBtn.classList.add('recording');
-                buttonText.textContent = 'Recording... (release to stop)';
+                buttonText.textContent = 'Recording...';
                 buttonWave.classList.add('active');
                 break;
                 
-            case 'waiting':
-                buttonText.textContent = 'Press again to continue';
+            case 'disabled':
+                voiceBtn.disabled = true;
+                voiceBtn.classList.add('disabled');
+                buttonText.textContent = 'Pool exhausted';
                 break;
         }
     }
@@ -94,6 +102,29 @@ class UIManager {
         }
         
         this.updateMainStatusIndicator();
+    }
+    
+    /**
+     * 커넥션 풀 상태 업데이트
+     * @param {Object} poolStatus 
+     */
+    updatePoolStatus(poolStatus) {
+        const { poolAvailable, poolBusy } = this.elements;
+        
+        if (poolAvailable) {
+            poolAvailable.textContent = poolStatus.available.toString();
+        }
+        
+        if (poolBusy) {
+            poolBusy.textContent = poolStatus.busy.toString();
+        }
+        
+        // 풀이 고갈되면 버튼 비활성화
+        if (!poolStatus.canAcceptNewSession) {
+            this.updateButtonState('disabled');
+        } else if (this.elements.voiceBtn.disabled && !this.elements.voiceBtn.classList.contains('recording')) {
+            this.updateButtonState('ready');
+        }
     }
     
     /**

@@ -1,25 +1,33 @@
+<!--
+파일: frontend/index.html
+설명: Voice Converter 메인 HTML 템플릿 (업데이트됨)
+변경사항:
+- 커넥션 풀 상태 표시 요소 추가 (POOL AVAIL, POOL BUSY)
+- 고정 크기 버튼 구조
+- 시스템 상태 모니터링 강화
+-->
 <!DOCTYPE html>
-<html>
+<html lang="ko">
 <head>
-    <title>실시간 음성 변환</title>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="static/css/voice_converter.css">
+    <title>Voice Converter</title>
+    <link rel="stylesheet" href="static/css/styles.css">
 </head>
 <body>
     <div class="container">
         <!-- 연결 상태 인디케이터 -->
-        <div class="connection-status" id="connectionStatus"></div>
+        <div id="connectionStatus" class="connection-status"></div>
         
-        <h1>Kidding</h1>
+        <!-- 제목 -->
+        <h1>Voice Converter</h1>
         
         <!-- 컨트롤 영역 -->
         <div class="controls">
             <div class="recording-section">
-                <!-- 버튼 내부에 애니메이션 통합 -->
                 <button id="voiceBtn">
                     <span class="button-text">Press to doubt</span>
-                    <!-- 버튼 내부 웨이브 애니메이션 -->
-                    <div class="button-wave-animation" id="buttonWaveAnimation">
+                    <div id="buttonWaveAnimation" class="button-wave-animation">
                         <div class="button-wave-bar"></div>
                         <div class="button-wave-bar"></div>
                         <div class="button-wave-bar"></div>
@@ -30,88 +38,65 @@
             </div>
         </div>
         
-        <!-- 상태 영역 -->
+        <!-- 상태 섹션 -->
         <div class="status-section">
-            <!-- 재생 중 표시를 더 명확하게 -->
-            <div class="playback-indicator" id="playbackIndicator">
+            <!-- 재생 인디케이터 -->
+            <div id="playbackIndicator" class="playback-indicator">
                 <span class="speaker-icon">🔊</span>
                 <div class="playback-animation">
                     <div class="sound-wave"></div>
                     <div class="sound-wave"></div>
                     <div class="sound-wave"></div>
                 </div>
+                <span>Playing</span>
             </div>
         </div>
         
-        <!-- 볼륨 미터 -->
-        <div class="volume-meter">
-            <div class="volume-level" id="volumeLevel"></div>
-        </div>
-        
-        <!-- 서버 상태 영역 (맨 아래로 이동) -->
-        <div class="server-status" id="serverStatus">
+        <!-- 서버 상태 -->
+        <div class="server-status">
             <div class="status-header">
                 <span class="status-title">SYSTEM STATUS</span>
-                <span class="status-indicator" id="mainStatusIndicator">●</span>
+                <span id="mainStatusIndicator" class="status-indicator disconnected">●</span>
             </div>
+            
             <div class="status-grid">
                 <div class="status-item">
                     <span class="status-label">WEBSOCKET</span>
-                    <span class="status-value" id="websocketStatus">DISCONNECTED</span>
+                    <span id="websocketStatus" class="status-value">DISCONNECTED</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">STT ENGINE</span>
-                    <span class="status-value" id="sttStatus">IDLE</span>
+                    <span class="status-label">STT</span>
+                    <span id="sttStatus" class="status-value">IDLE</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">AI VOICE</span>
-                    <span class="status-value" id="voiceStatus">IDLE</span>
+                    <span class="status-label">VOICE</span>
+                    <span id="voiceStatus" class="status-value">IDLE</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">TTS ENGINE</span>
-                    <span class="status-value" id="ttsStatus">IDLE</span>
+                    <span class="status-label">TTS</span>
+                    <span id="ttsStatus" class="status-value">IDLE</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">ACTIVE CONN</span>
-                    <span class="status-value" id="connCount">0</span>
+                    <span class="status-label">POOL AVAIL</span>
+                    <span id="poolAvailable" class="status-value">0</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">POOL BUSY</span>
+                    <span id="poolBusy" class="status-value">0</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">SESSIONS</span>
+                    <span id="connCount" class="status-value">0</span>
                 </div>
                 <div class="status-item">
                     <span class="status-label">UPTIME</span>
-                    <span class="status-value" id="uptime">00:00:00</span>
+                    <span id="uptime" class="status-value">00:00:00</span>
                 </div>
             </div>
         </div>
-        
-        <!-- 로딩 스피너 -->
-        <div class="loading-spinner" id="loadingSpinner"></div>
     </div>
-    
-    <!-- ES6 모듈로 스크립트 로드 -->
+
+    <!-- JavaScript 모듈 로드 -->
     <script type="module" src="static/js/voice_converter.js"></script>
-    
-    <!-- 디버그용 스크립트 (개발 중에만 사용) -->
-    <script>
-        // 개발 중 디버그 함수들
-        window.debugVoiceConverter = {
-            getInfo: () => {
-                if (window.getVoiceConverterDebugInfo) {
-                    return window.getVoiceConverterDebugInfo();
-                }
-                return 'VoiceConverter가 아직 초기화되지 않았습니다.';
-            },
-            
-            // 콘솔에서 사용할 수 있는 헬퍼 함수들
-            help: () => {
-                console.log(`
-🎯 VoiceConverter 디버그 명령어:
-- debugVoiceConverter.getInfo() : 현재 상태 정보
-- debugVoiceConverter.help() : 이 도움말
-                `);
-            }
-        };
-        
-        // 개발 중 자동으로 도움말 표시
-        console.log('🔧 개발 모드: debugVoiceConverter.help() 로 디버그 명령어를 확인하세요.');
-    </script>
 </body>
 </html>

@@ -1,9 +1,18 @@
+/**
+ * 파일: frontend/js/main.js
+ * 설명: 메인 VoiceConverter 클래스 (업데이트됨)
+ * 변경사항:
+ * - 진짜 0초 connection을 위해 페이지 로드 즉시 커넥션 풀 백그라운드 초기화
+ * - 사용자는 대기 없이 즉시 버튼 사용 가능
+ * - connecting 단계 완전 제거
+ * - 실제 WebSocket 연결은 백그라운드에서 미리 완료
+ */
 import { SessionManager } from './session_manager.js';
 import { UIManager } from './ui_manager.js';
 
 /**
  * 메인 VoiceConverter 클래스
- * 세션 관리와 UI 관리를 통합하여 전체 애플리케이션을 제어
+ * 커넥션 풀을 사용한 세션 관리와 UI 관리를 통합하여 전체 애플리케이션을 제어
  */
 class VoiceConverter {
     constructor() {
@@ -12,12 +21,42 @@ class VoiceConverter {
         // 모듈 초기화
         this.sessionManager = new SessionManager();
         this.uiManager = new UIManager();
+        this.isPoolReady = false;
         
-        // 이벤트 핸들러 바인딩
+        // 이벤트 핸들러는 즉시 바인딩
         this.bindEvents();
         this.setupEventHandlers();
         
-        console.log('✅ VoiceConverter 초기화 완료');
+        // 사용자에게는 즉시 준비된 것처럼 보이게 함
+        this.uiManager.updateButtonState('ready');
+        
+        // 백그라운드에서 커넥션 풀 준비 (사용자 대기 없음)
+        this.initializeConnectionPoolBackground();
+        
+        console.log('✅ VoiceConverter UI 준비 완료 (커넥션 풀은 백그라운드에서 준비 중)');
+    }
+    
+    /**
+     * 백그라운드에서 커넥션 풀 초기화 (사용자 대기 없음)
+     */
+    async initializeConnectionPoolBackground() {
+        try {
+            console.log('🏊 백그라운드에서 커넥션 풀 준비 중... (사용자는 즉시 사용 가능)');
+            
+            // 백그라운드에서 실행 (사용자는 기다리지 않음)
+            await this.sessionManager.initialize();
+            
+            this.isPoolReady = true;
+            console.log('✅ 커넥션 풀 준비 완료 - 이제 정말 0초 connection!');
+            
+            // 풀이 준비되면 상태 업데이트
+            this.uiManager.showToast('시스템 준비 완료! 이제 즉시 녹음 가능합니다.', 'success');
+            
+        } catch (error) {
+            console.error('❌ 커넥션 풀 준비 실패:', error);
+            this.uiManager.updateButtonState('disabled');
+            this.uiManager.showToast('시스템 초기화에 실패했습니다.', 'error');
+        }
     }
     
     /**
@@ -35,7 +74,7 @@ class VoiceConverter {
         // 마우스 이벤트
         voiceBtn.addEventListener('mousedown', (e) => {
             e.preventDefault();
-            if (!isPressed) {
+            if (!isPressed && !voiceBtn.disabled) {
                 isPressed = true;
                 this.handlePressStart();
             }
@@ -59,7 +98,7 @@ class VoiceConverter {
         // 터치 이벤트
         voiceBtn.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            if (!isPressed) {
+            if (!isPressed && !voiceBtn.disabled) {
                 isPressed = true;
                 this.handlePressStart();
             }
@@ -117,40 +156,77 @@ class VoiceConverter {
         this.sessionManager.onSessionError = (sessionId) => {
             this.handleSessionError(sessionId);
         };
+        
+        // 커넥션 풀 상태 변경 시 UI 업데이트
+        this.sessionManager.onPoolStatusChange = (poolStatus) => {
+            this.handlePoolStatusChange(poolStatus);
+        };
     }
     
     /**
-     * 버튼 눌림 처리
+     * 버튼 눌림 처리 - 진짜 0초 connection (이미 연결된 커넥션 사용)
      */
     async handlePressStart() {
         console.log('🎤 버튼 눌림 감지');
         
-        try {
-            this.uiManager.updateButtonState('connecting');
-            this.uiManager.updateSystemStatus('stt', 'CONNECTING');
+        // 풀이 준비되지 않은 경우의 처리
+        if (!this.isPoolReady) {
+            // 즉시 녹음 상태로 보이게 하여 UX 향상
+            this.uiManager.updateButtonState('recording');
+            this.uiManager.showToast('커넥션 준비 중... 잠시만 기다려주세요.', 'warning');
             
-            const sessionId = await this.sessionManager.resumeOrStartSession();
-            console.log(`✅ 세션 시작/재개: ${sessionId}`);
+            // 최대 5초까지 기다림 (일반적으로 1-2초면 충분)
+            let waitTime = 0;
+            const maxWait = 5000;
+            const checkInterval = 100;
+            
+            while (!this.isPoolReady && waitTime < maxWait) {
+                await new Promise(resolve => setTimeout(resolve, checkInterval));
+                waitTime += checkInterval;
+            }
+            
+            if (!this.isPoolReady) {
+                this.uiManager.updateButtonState('ready');
+                this.uiManager.showToast('커넥션 준비에 시간이 오래 걸리고 있습니다. 잠시 후 다시 시도해주세요.', 'error');
+                return;
+            }
+        }
+        
+        try {
+            // 이미 연결된 커넥션 확인 (즉시 확인 가능)
+            if (!this.sessionManager.canStartNewRecording()) {
+                this.uiManager.showToast('사용 가능한 커넥션이 없습니다.', 'warning');
+                return;
+            }
+            
+            // 🚀 여기서 진짜 0초 connection! (이미 연결된 WebSocket 사용)
+            this.uiManager.updateButtonState('recording');
+            const sessionId = await this.sessionManager.startNewRecording();
+            
+            console.log(`⚡ 0초 connection 녹음 시작 완료: ${sessionId}`);
             
         } catch (error) {
-            console.error('❌ 세션 시작 오류:', error);
+            console.error('❌ 녹음 시작 오류:', error);
             this.uiManager.updateButtonState('ready');
             this.uiManager.updateSystemStatus('stt', 'ERROR');
-            this.uiManager.showToast('연결 오류가 발생했습니다.', 'error');
+            
+            if (error.message.includes('사용 가능한 커넥션이 없습니다')) {
+                this.uiManager.showToast('모든 커넥션이 사용 중입니다. 잠시 후 다시 시도해주세요.', 'warning');
+            } else {
+                this.uiManager.showToast('녹음 시작 중 오류가 발생했습니다.', 'error');
+            }
         }
     }
     
     /**
-     * 버튼 릴리즈 처리
+     * 버튼 릴리즈 처리 - 녹음 중지
      */
     handlePressEnd() {
-        console.log('🔽 버튼 릴리즈 감지');
+        console.log('🔽 버튼 릴리즈 감지 - 녹음 중지');
         
-        this.sessionManager.setLastReleaseTime();
-        this.sessionManager.pauseCurrentSession();
-        
-        this.uiManager.updateButtonState('waiting');
-        this.uiManager.updateSystemStatus('stt', 'PAUSED');
+        this.sessionManager.stopCurrentSessionRecording();
+        this.uiManager.updateButtonState('ready');
+        this.uiManager.updateSystemStatus('stt', 'IDLE');
     }
     
     /**
@@ -166,24 +242,14 @@ class VoiceConverter {
         
         // 세션 상태에 따른 UI 업데이트
         switch (session.status) {
-            case 'connecting':
-                this.uiManager.updateButtonState('connecting');
-                this.uiManager.updateSystemStatus('stt', 'CONNECTING');
-                break;
-                
-            case 'connected':
-                this.uiManager.updateSystemStatus('stt', 'CONNECTED');
+            case 'ready':
+                this.uiManager.updateSystemStatus('stt', 'IDLE');
                 break;
                 
             case 'recording':
                 this.uiManager.updateButtonState('recording');
                 this.uiManager.updateSystemStatus('stt', 'RECORDING');
                 this.uiManager.updateSystemStatus('voice', 'IDLE');
-                break;
-                
-            case 'waiting_reconnect':
-                this.uiManager.updateButtonState('waiting');
-                this.uiManager.updateSystemStatus('stt', 'PAUSED');
                 break;
                 
             case 'processing':
@@ -212,6 +278,17 @@ class VoiceConverter {
         
         // 전체 상태 업데이트
         this.updateOverallStatus();
+    }
+    
+    /**
+     * 커넥션 풀 상태 변경 처리
+     * @param {Object} poolStatus 
+     */
+    handlePoolStatusChange(poolStatus) {
+        this.uiManager.updatePoolStatus(poolStatus);
+        
+        // 풀 상태 로깅
+        console.log(`🏊 풀 상태: 사용가능=${poolStatus.available}, 사용중=${poolStatus.busy}, 총=${poolStatus.total}`);
     }
     
     /**
@@ -258,7 +335,8 @@ class VoiceConverter {
         
         // 로그 출력
         const totalSessions = this.sessionManager.getActiveSessionCount();
-        console.log(`📊 상태 업데이트 - 총 세션: ${totalSessions}, 재생중: ${playingCount}, 처리중: ${processingCount}`);
+        const poolStatus = this.sessionManager.getPoolStatus();
+        console.log(`📊 상태 업데이트 - 총 세션: ${totalSessions}, 재생중: ${playingCount}, 처리중: ${processingCount}, 풀 상태: ${poolStatus.available}/${poolStatus.total}`);
     }
     
     /**
@@ -267,14 +345,13 @@ class VoiceConverter {
     destroy() {
         console.log('🧹 VoiceConverter 정리 중...');
         
-        // 모든 세션 정리
-        this.sessionManager.sessions.forEach((session, sessionId) => {
-            this.sessionManager.cleanupSession(sessionId);
-        });
+        // 세션 매니저 정리 (커넥션 풀 포함)
+        this.sessionManager.destroy();
         
         // UI 정리
         this.uiManager.destroy();
         
+        this.isInitialized = false;
         console.log('✅ VoiceConverter 정리 완료');
     }
     
@@ -282,9 +359,12 @@ class VoiceConverter {
      * 디버그 정보 출력
      */
     getDebugInfo() {
+        // 디버그 정보에 풀 준비 상태 추가
         return {
+            isPoolReady: this.isPoolReady,
             activeSessions: this.sessionManager.getActiveSessionCount(),
             currentSession: this.sessionManager.currentSession,
+            poolStatus: this.sessionManager.getPoolStatus(),
             sessionStatuses: Array.from(this.sessionManager.sessions.values()).map(s => ({
                 id: s.id,
                 status: s.status,
