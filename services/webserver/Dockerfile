@@ -1,38 +1,39 @@
-# services/websocket-service/Dockerfile
-FROM python:3.11-slim
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS uv
 
-# 메타데이터
-LABEL maintainer="EuKidding Team"
-LABEL description="WebSocket Service for EuKidding Voice Converter"
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
 
-# 작업 디렉토리 설정
 WORKDIR /app
 
-# 시스템 패키지 업데이트 및 필요한 패키지 설치
-RUN apt-get update && apt-get install -y \
-    curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+# 프로젝트 루트의 파일들 복사
+COPY uv.lock pyproject.toml ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
 
-# Python 의존성 먼저 복사 및 설치 (캐시 최적화)
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+FROM python:3.12-slim-bookworm
 
-# 애플리케이션 파일 복사
-COPY . .
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd --create-home --shell /bin/bash app
 
-# 비root 사용자 생성 (보안)
-RUN useradd --create-home --shell /bin/bash app \
-    && chown -R app:app /app
+WORKDIR /app
+
+# .venv 복사 (uv 스테이지에서)
+COPY --from=uv --chown=app:app /app/.venv /app/.venv
+
+# 프로젝트 파일들 복사 (빌드 컨텍스트는 webservice/ 디렉토리)
+COPY --chown=app:app src/ /app/src/
+COPY --chown=app:app . /app/
+
 USER app
 
-# 포트 노출
-EXPOSE 8001
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app"
 
-# 헬스체크
+EXPOSE 8000
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
 
-# 애플리케이션 실행
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
