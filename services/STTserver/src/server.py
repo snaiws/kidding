@@ -12,9 +12,9 @@ from typing import Dict, Any
 # import audio_service_pb2_grpc
 
 from models.stt_model import STTModel
-from models.tts_model import TTSModel
-from utils.config import AppConfig
-from utils.audio_processor import AudioProcessor
+# from models.tts_model import TTSModel
+from configs.env import AppConfig
+from audio_processor import AudioProcessor
 
 # 로깅 설정
 logging.basicConfig(

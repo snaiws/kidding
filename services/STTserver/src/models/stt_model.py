@@ -5,6 +5,9 @@ import numpy as np
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from typing import Dict, Any, Union
 import logging
+import time
+
+from .base_model import BaseModel
 
 logger = logging.getLogger(__name__)
 
