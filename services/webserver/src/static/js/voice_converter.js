@@ -1,5 +1,5 @@
 /**
- * 파일: frontend/js/main.js
+ * 파일: services/webserver/src/static/js/voice_converter.js
  * 설명: 메인 VoiceConverter 클래스 (업데이트됨)
  * 변경사항:
  * - 진짜 0초 connection을 위해 페이지 로드 즉시 커넥션 풀 백그라운드 초기화

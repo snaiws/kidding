@@ -1,4 +1,4 @@
-
+# services/STTserver/src/server.py
 import grpc
 from concurrent import futures
 import logging
@@ -7,9 +7,9 @@ import sys
 import time
 from typing import Dict, Any
 
-# proto 파일에서 생성된 모듈들 (실제로는 protoc로 생성)
-# import audio_service_pb2
-# import audio_service_pb2_grpc
+# proto 파일에서 생성된 모듈들
+import audio_service_pb2
+import audio_service_pb2_grpc
 
 from models.stt_model import STTModel
 # from models.tts_model import TTSModel
@@ -23,13 +23,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class AudioProcessingServicer:  # audio_service_pb2_grpc.AudioProcessingServicer
+class AudioProcessingServicer(audio_service_pb2_grpc.AudioProcessingServicer):
     """gRPC 오디오 처리 서비스"""
     
     def __init__(self, config: AppConfig):
         self.config = config
         self.stt_model = None
-        self.tts_model = None
+        # self.tts_model = None
         self.audio_processor = AudioProcessor()
         self._initialize_models()
     
@@ -46,14 +46,6 @@ class AudioProcessingServicer:  # audio_service_pb2_grpc.AudioProcessingServicer
             )
             self.stt_model.load_model()
             
-            # TTS 모델 초기화
-            self.tts_model = TTSModel(
-                model_name=self.config.model.tts_model_name,
-                device=self.config.model.device,
-                cache_dir=self.config.model.cache_dir
-            )
-            self.tts_model.load_model()
-            
             logger.info("모델 초기화 완료")
             
         except Exception as e:
@@ -63,22 +55,24 @@ class AudioProcessingServicer:  # audio_service_pb2_grpc.AudioProcessingServicer
     def ProcessSTT(self, request, context):
         """STT 처리 (Unary RPC)"""
         try:
-            logger.info(f"STT 요청 처리 시작: {request.request_id}")
+            logger.info(f"🎤 STT 요청 처리 시작: {request.request_id}")
+            start_time = time.time()
             
             # 오디오 데이터 전처리
             audio_data, sr = self.audio_processor.load_audio_from_bytes(
                 request.audio_data, 
-                target_sr=16000
+                target_sr=request.config.sample_rate or 16000
             )
             
             # VAD 체크 (선택적)
             if request.config.enable_vad:
                 if not self.audio_processor.detect_speech_activity(audio_data, sr):
-                    return self._create_stt_response(
+                    logger.warning(f"⚠️ 음성이 감지되지 않음: {request.request_id}")
+                    return audio_service_pb2.STTResponse(
                         request_id=request.request_id,
                         transcription="",
                         confidence=0.0,
-                        error_message="음성이 감지되지 않았습니다"
+                        error="음성이 감지되지 않았습니다"
                     )
             
             # 오디오 정규화
@@ -90,112 +84,94 @@ class AudioProcessingServicer:  # audio_service_pb2_grpc.AudioProcessingServicer
                 language=request.config.language or "korean"
             )
             
+            processing_time = (time.time() - start_time) * 1000
+            
             # 응답 생성
-            response = self._create_stt_response(
+            response = audio_service_pb2.STTResponse(
                 request_id=request.request_id,
                 transcription=result["transcription"],
                 confidence=result["confidence"],
-                processing_time_ms=result["processing_time_ms"],
-                model_used=result["model_used"]
+                stats=audio_service_pb2.ProcessingStats(
+                    processing_time_ms=int(processing_time),
+                    model_used=result["model_used"],
+                    timestamp=int(time.time()),
+                    audio_duration_ms=int(result.get("audio_length_ms", 0))  # stt_model에서 계산된 값 사용
+                )
             )
             
-            logger.info(f"STT 요청 처리 완료: {request.request_id}")
+            logger.info(f"✅ STT 요청 처리 완료: {request.request_id}")
+            logger.info(f"📝 STT 결과: \"{result['transcription']}\" (신뢰도: {result['confidence']:.2f}, 처리시간: {processing_time:.1f}ms)")
+            
             return response
             
         except Exception as e:
-            logger.error(f"STT 처리 중 오류: {e}")
+            logger.error(f"❌ STT 처리 중 오류 ({request.request_id}): {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"STT 처리 실패: {str(e)}")
-            return self._create_stt_response(request_id=request.request_id)
+            return audio_service_pb2.STTResponse(
+                request_id=request.request_id,
+                error=str(e)
+            )
     
     def ProcessTTS(self, request, context):
-        """TTS 처리 (Unary RPC)"""
-        try:
-            logger.info(f"TTS 요청 처리 시작: {request.request_id}")
-            
-            # 입력 텍스트 검증
-            if not request.text.strip():
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("입력 텍스트가 비어있습니다")
-                return self._create_tts_response(request_id=request.request_id)
-            
-            # TTS 모델로 처리
-            result = self.tts_model.process(
-                text=request.text,
-                voice_config=request.voice_config
-            )
-            
-            # 응답 생성
-            response = self._create_tts_response(
-                request_id=request.request_id,
-                audio_data=result["audio_data"],
-                format=result["format"],
-                processing_time_ms=result["processing_time_ms"],
-                model_used=result["model_used"]
-            )
-            
-            logger.info(f"TTS 요청 처리 완료: {request.request_id}")
-            return response
-            
-        except Exception as e:
-            logger.error(f"TTS 처리 중 오류: {e}")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"TTS 처리 실패: {str(e)}")
-            return self._create_tts_response(request_id=request.request_id)
+        """TTS 처리 (향후 구현)"""
+        logger.warning(f"⚠️ TTS 기능은 아직 구현되지 않음: {request.request_id}")
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("TTS 기능은 아직 구현되지 않았습니다")
+        return audio_service_pb2.TTSResponse(
+            request_id=request.request_id,
+            error="TTS 기능은 아직 구현되지 않았습니다"
+        )
     
     def HealthCheck(self, request, context):
         """헬스 체크"""
         try:
-            # 모델 상태 확인
-            stt_status = self.stt_model.is_loaded() if self.stt_model else False
-            tts_status = self.tts_model.is_loaded() if self.tts_model else False
+            logger.debug(f"🔍 헬스 체크 요청: {request.service}")
             
-            if stt_status and tts_status:
-                status = 1  # SERVING
-            else:
-                status = 2  # NOT_SERVING
+            # STT 모델 상태 확인
+            stt_available = self.stt_model.is_loaded() if self.stt_model else False
+            tts_available = False  # TTS는 아직 구현 안됨
             
-            return self._create_health_response(status)
+            # 서비스별 상태
+            services = {}
+            
+            if request.service in ["stt", "all"]:
+                services["stt"] = audio_service_pb2.ServiceHealth(
+                    available=stt_available,
+                    model_name=self.config.model.stt_model_name,
+                    version="1.0",
+                    uptime_seconds=int(time.time())
+                )
+            
+            if request.service in ["tts", "all"]:
+                services["tts"] = audio_service_pb2.ServiceHealth(
+                    available=tts_available,
+                    model_name="not_implemented",
+                    version="0.0",
+                    uptime_seconds=0
+                )
+            
+            # 전체 서비스 상태 결정
+            if request.service == "stt":
+                status = audio_service_pb2.SERVING if stt_available else audio_service_pb2.NOT_SERVING
+            elif request.service == "tts":
+                status = audio_service_pb2.NOT_SERVING  # TTS 미구현
+            else:  # "all" 또는 기타
+                status = audio_service_pb2.SERVING if stt_available else audio_service_pb2.NOT_SERVING
+            
+            response = audio_service_pb2.HealthCheckResponse(
+                status=status,
+                services=services
+            )
+            
+            logger.debug(f"✅ 헬스 체크 완료: {status}")
+            return response
             
         except Exception as e:
-            logger.error(f"헬스 체크 실패: {e}")
-            return self._create_health_response(2)  # NOT_SERVING
-    
-    def _create_stt_response(self, request_id: str, transcription: str = "", 
-                           confidence: float = 0.0, processing_time_ms: float = 0.0,
-                           model_used: str = "", error_message: str = ""):
-        """STT 응답 생성 헬퍼"""
-        # 실제로는 audio_service_pb2.STTResponse() 사용
-        return {
-            "transcription": transcription,
-            "confidence": confidence,
-            "request_id": request_id,
-            "stats": {
-                "processing_time_ms": processing_time_ms,
-                "model_used": model_used
-            },
-            "error": error_message
-        }
-    
-    def _create_tts_response(self, request_id: str, audio_data: bytes = b"",
-                           format: str = "WAV", processing_time_ms: float = 0.0,
-                           model_used: str = ""):
-        """TTS 응답 생성 헬퍼"""
-        # 실제로는 audio_service_pb2.TTSResponse() 사용
-        return {
-            "audio_data": audio_data,
-            "format": format,
-            "request_id": request_id,
-            "stats": {
-                "processing_time_ms": processing_time_ms,
-                "model_used": model_used
-            }
-        }
-    
-    def _create_health_response(self, status: int):
-        """헬스 체크 응답 생성 헬퍼"""
-        # 실제로는 audio_service_pb2.HealthCheckResponse() 사용
-        return {"status": status}
+            logger.error(f"❌ 헬스 체크 실패: {e}")
+            return audio_service_pb2.HealthCheckResponse(
+                status=audio_service_pb2.NOT_SERVING
+            )
 
 class GRPCServer:
     """gRPC 서버 관리자"""
@@ -208,7 +184,7 @@ class GRPCServer:
     def start(self) -> None:
         """서버 시작"""
         try:
-            logger.info("gRPC 서버 시작")
+            logger.info("🚀 gRPC 서버 시작")
             
             # 서버 옵션 설정
             options = [
@@ -230,9 +206,9 @@ class GRPCServer:
             
             # 서비스 등록
             self.servicer = AudioProcessingServicer(self.config)
-            # audio_service_pb2_grpc.add_AudioProcessingServicer_to_server(
-            #     self.servicer, self.server
-            # )
+            audio_service_pb2_grpc.add_AudioProcessingServicer_to_server(
+                self.servicer, self.server
+            )
             
             # 포트 바인딩
             listen_addr = f"{self.config.server.host}:{self.config.server.port}"
@@ -240,7 +216,7 @@ class GRPCServer:
             
             # 서버 시작
             self.server.start()
-            logger.info(f"gRPC 서버가 {listen_addr}에서 시작되었습니다")
+            logger.info(f"✅ gRPC 서버가 {listen_addr}에서 시작되었습니다")
             
             # 종료 시그널 핸들러 등록
             signal.signal(signal.SIGTERM, self._signal_handler)
@@ -250,20 +226,20 @@ class GRPCServer:
             self.server.wait_for_termination()
             
         except Exception as e:
-            logger.error(f"서버 시작 실패: {e}")
+            logger.error(f"❌ 서버 시작 실패: {e}")
             raise
     
     def _signal_handler(self, signum, frame):
         """종료 시그널 핸들러"""
-        logger.info(f"종료 시그널 수신: {signum}")
+        logger.info(f"🔄 종료 시그널 수신: {signum}")
         self.stop()
     
     def stop(self, grace_period: int = 30):
         """서버 정지"""
         if self.server:
-            logger.info("gRPC 서버 정지 중...")
+            logger.info("🔄 gRPC 서버 정지 중...")
             self.server.stop(grace_period)
-            logger.info("gRPC 서버 정지 완료")
+            logger.info("✅ gRPC 서버 정지 완료")
 
 def main():
     """메인 함수"""
@@ -274,9 +250,8 @@ def main():
         # 로깅 레벨 설정
         logging.getLogger().setLevel(getattr(logging, config.log_level.upper()))
         
-        logger.info("=== 허깅페이스 gRPC 서버 시작 ===")
+        logger.info("=== 🎤 STT gRPC 서버 시작 ===")
         logger.info(f"STT 모델: {config.model.stt_model_name}")
-        logger.info(f"TTS 모델: {config.model.tts_model_name}")
         logger.info(f"디바이스: {config.model.device}")
         logger.info(f"서버 주소: {config.server.host}:{config.server.port}")
         
@@ -285,9 +260,9 @@ def main():
         server.start()
         
     except KeyboardInterrupt:
-        logger.info("사용자 인터럽트로 서버 종료")
+        logger.info("🔄 사용자 인터럽트로 서버 종료")
     except Exception as e:
-        logger.error(f"서버 실행 중 오류: {e}")
+        logger.error(f"❌ 서버 실행 중 오류: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":

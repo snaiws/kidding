@@ -49,7 +49,9 @@ class ConnectionPoolManager {
         
         return new Promise((resolve, reject) => {
             try {
-                const ws = new WebSocket('ws://localhost:8000/ws/audio');
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const host = window.location.host; // localhost:50014
+                const ws = new WebSocket(`${protocol}//${host}/ws/audio`);
                 ws.binaryType = 'arraybuffer';
                 
                 const connection = {

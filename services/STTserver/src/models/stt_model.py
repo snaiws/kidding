@@ -67,7 +67,7 @@ class STTModel(BaseModel):
             logger.info("STT 모델 워밍업 완료")
         except Exception as e:
             logger.warning(f"STT 모델 워밍업 실패: {e}")
-    
+            
     def process(self, audio_data: Union[bytes, np.ndarray], language: str = "korean", **kwargs) -> Dict[str, Any]:
         """음성을 텍스트로 변환"""
         if not self._is_loaded:
@@ -93,6 +93,16 @@ class STTModel(BaseModel):
                 return_tensors="pt"
             ).input_features.to(self.device)
             
+            # 🔧 핵심 수정: 모델의 데이터 타입에 맞춰 입력 변환
+            if self.model.dtype == torch.float16:
+                input_features = input_features.half()
+                logger.debug("입력을 float16으로 변환")
+            elif self.model.dtype == torch.float32:
+                input_features = input_features.float()
+                logger.debug("입력을 float32로 변환")
+            
+            logger.info(f"모델 dtype: {self.model.dtype}, 입력 dtype: {input_features.dtype}")
+            
             # 언어 토큰 설정
             forced_decoder_ids = self.processor.get_decoder_prompt_ids(
                 language=language, 
@@ -115,6 +125,8 @@ class STTModel(BaseModel):
             )[0]
             
             processing_time = (time.time() - start_time) * 1000
+            
+            logger.info(f"STT 처리 완료: '{transcription}' ({processing_time:.1f}ms)")
             
             return {
                 "transcription": transcription.strip(),

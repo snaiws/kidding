@@ -212,7 +212,8 @@ class UIManager {
      * 상태 WebSocket 연결
      */
     connectStatusWebSocket() {
-        this.statusWS = new WebSocket('ws://localhost:8000/ws/status');
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        this.statusWS = new WebSocket(`${protocol}//${window.location.host}/ws/status`);
         
         this.statusWS.onopen = () => {
             this.updateConnectionStatus(true);
