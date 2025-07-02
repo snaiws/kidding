@@ -4,6 +4,7 @@ members = [
     "shared/miniflow",
     "services/webserver",
     "services/STTserver",
+    "services/TTSserver",
 ]
 
 # 전체 워크스페이스 공통 개발 의존성

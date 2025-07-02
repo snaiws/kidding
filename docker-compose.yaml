@@ -56,6 +56,36 @@ services:
       start_period: 90s
     shm_size: 2gb
 
+  tts-server:
+    build:
+      context: .
+      dockerfile: ./services/TTSserver/Dockerfile
+    container_name: kidding-tts
+    ports:
+      - "${PORT_TTS_GRPC}:50051"
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - kidding-network
+    volumes:
+      - ${PATH_TTS_MODELS}:/app/models
+      - ${PATH_TTS_LOG}:/app/logs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    shm_size: 2gb
+
   nginx:
     image: nginx:alpine
     ports:

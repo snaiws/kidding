@@ -1,0 +1,22 @@
+# services/TTSserver/pyproject.toml
+[project]
+name = "ttsserver"
+version = "0.1.0"
+description = "Text-to-Speech gRPC Server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "grpcio>=1.73.0",
+    "grpcio-tools>=1.73.0",
+    "librosa>=0.11.0",
+    "numpy>=2.2.6",
+    "torch>=2.7.1",
+    "torchaudio>=2.7.1",
+    "transformers>=4.52.4",  # 허깅페이스 XTTS-v2 직접 사용
+    "accelerate>=0.21.0",    # 모델 로딩 최적화
+    "soundfile>=0.12.1",     # 오디오 파일 I/O
+    "miniflow",
+]
+
+[tool.uv.sources]
+miniflow = { workspace = true }

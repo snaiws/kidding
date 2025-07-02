@@ -1,18 +1,18 @@
 /**
  * 파일: services/webserver/src/static/js/voice_converter.js
- * 설명: 메인 VoiceConverter 클래스 (업데이트됨)
+ * 설명: 메인 VoiceConverter 클래스 (STT→TTS 파이프라인 지원)
  * 변경사항:
- * - 진짜 0초 connection을 위해 페이지 로드 즉시 커넥션 풀 백그라운드 초기화
- * - 사용자는 대기 없이 즉시 버튼 사용 가능
- * - connecting 단계 완전 제거
- * - 실제 WebSocket 연결은 백그라운드에서 미리 완료
+ * - STT + TTS 서버 연동
+ * - 음성 → 텍스트 → 음성 변환 파이프라인
+ * - TTS 처리 상태 추가
+ * - 변환된 음성 재생 처리
  */
 import { SessionManager } from './session_manager.js';
 import { UIManager } from './ui_manager.js';
 
 /**
  * 메인 VoiceConverter 클래스
- * 커넥션 풀을 사용한 세션 관리와 UI 관리를 통합하여 전체 애플리케이션을 제어
+ * STT→TTS 파이프라인을 통한 음성 변환 기능 제공
  */
 class VoiceConverter {
     constructor() {
@@ -50,7 +50,7 @@ class VoiceConverter {
             console.log('✅ 커넥션 풀 준비 완료 - 이제 정말 0초 connection!');
             
             // 풀이 준비되면 상태 업데이트
-            this.uiManager.showToast('시스템 준비 완료! 이제 즉시 녹음 가능합니다.', 'success');
+            this.uiManager.showToast('시스템 준비 완료! 음성 변환 서비스가 활성화되었습니다.', 'success');
             
         } catch (error) {
             console.error('❌ 커넥션 풀 준비 실패:', error);
@@ -161,21 +161,31 @@ class VoiceConverter {
         this.sessionManager.onPoolStatusChange = (poolStatus) => {
             this.handlePoolStatusChange(poolStatus);
         };
+        
+        // STT 결과 수신 시 처리
+        this.sessionManager.onSTTResult = (sessionId, sttResult) => {
+            this.handleSTTResult(sessionId, sttResult);
+        };
+        
+        // TTS 처리 상태 업데이트
+        this.sessionManager.onTTSStatus = (sessionId, status) => {
+            this.handleTTSStatus(sessionId, status);
+        };
     }
     
     /**
-     * 버튼 눌림 처리 - 진짜 0초 connection (이미 연결된 커넥션 사용)
+     * 버튼 눌림 처리 - 음성 변환 녹음 시작
      */
     async handlePressStart() {
-        console.log('🎤 버튼 눌림 감지');
+        console.log('🎤 음성 변환 녹음 시작');
         
         // 풀이 준비되지 않은 경우의 처리
         if (!this.isPoolReady) {
             // 즉시 녹음 상태로 보이게 하여 UX 향상
             this.uiManager.updateButtonState('recording');
-            this.uiManager.showToast('커넥션 준비 중... 잠시만 기다려주세요.', 'warning');
+            this.uiManager.showToast('시스템 준비 중... 잠시만 기다려주세요.', 'warning');
             
-            // 최대 5초까지 기다림 (일반적으로 1-2초면 충분)
+            // 최대 5초까지 기다림
             let waitTime = 0;
             const maxWait = 5000;
             const checkInterval = 100;
@@ -187,23 +197,28 @@ class VoiceConverter {
             
             if (!this.isPoolReady) {
                 this.uiManager.updateButtonState('ready');
-                this.uiManager.showToast('커넥션 준비에 시간이 오래 걸리고 있습니다. 잠시 후 다시 시도해주세요.', 'error');
+                this.uiManager.showToast('시스템 준비에 시간이 오래 걸리고 있습니다. 잠시 후 다시 시도해주세요.', 'error');
                 return;
             }
         }
         
         try {
-            // 이미 연결된 커넥션 확인 (즉시 확인 가능)
+            // 커넥션 가용성 확인
             if (!this.sessionManager.canStartNewRecording()) {
                 this.uiManager.showToast('사용 가능한 커넥션이 없습니다.', 'warning');
                 return;
             }
             
-            // 🚀 여기서 진짜 0초 connection! (이미 연결된 WebSocket 사용)
+            // 녹음 시작
             this.uiManager.updateButtonState('recording');
             const sessionId = await this.sessionManager.startNewRecording();
             
-            console.log(`⚡ 0초 connection 녹음 시작 완료: ${sessionId}`);
+            // UI 상태 업데이트
+            this.uiManager.updateSystemStatus('stt', 'RECORDING');
+            this.uiManager.updateSystemStatus('tts', 'IDLE');
+            this.uiManager.showToast('🎤 음성 녹음 중... 말씀해주세요!', 'info');
+            
+            console.log(`⚡ 음성 변환 녹음 시작: ${sessionId}`);
             
         } catch (error) {
             console.error('❌ 녹음 시작 오류:', error);
@@ -219,14 +234,15 @@ class VoiceConverter {
     }
     
     /**
-     * 버튼 릴리즈 처리 - 녹음 중지
+     * 버튼 릴리즈 처리 - 녹음 중지 및 변환 시작
      */
     handlePressEnd() {
-        console.log('🔽 버튼 릴리즈 감지 - 녹음 중지');
+        console.log('🔽 음성 변환 녹음 완료 - STT→TTS 파이프라인 시작');
         
         this.sessionManager.stopCurrentSessionRecording();
         this.uiManager.updateButtonState('ready');
-        this.uiManager.updateSystemStatus('stt', 'IDLE');
+        this.uiManager.updateSystemStatus('stt', 'PROCESSING');
+        this.uiManager.showToast('🔄 음성을 텍스트로 변환 중...', 'info');
     }
     
     /**
@@ -244,27 +260,34 @@ class VoiceConverter {
         switch (session.status) {
             case 'ready':
                 this.uiManager.updateSystemStatus('stt', 'IDLE');
+                this.uiManager.updateSystemStatus('tts', 'IDLE');
                 break;
                 
             case 'recording':
                 this.uiManager.updateButtonState('recording');
                 this.uiManager.updateSystemStatus('stt', 'RECORDING');
-                this.uiManager.updateSystemStatus('voice', 'IDLE');
+                this.uiManager.updateSystemStatus('tts', 'IDLE');
                 break;
                 
             case 'processing':
                 this.uiManager.updateButtonState('ready');
+                this.uiManager.updateSystemStatus('stt', 'PROCESSING');
+                this.uiManager.updateSystemStatus('tts', 'IDLE');
+                break;
+                
+            case 'converting':
                 this.uiManager.updateSystemStatus('stt', 'IDLE');
-                this.uiManager.updateSystemStatus('voice', 'PROCESSING');
+                this.uiManager.updateSystemStatus('tts', 'PROCESSING');
                 break;
                 
             case 'playing':
-                this.uiManager.updateSystemStatus('voice', 'IDLE');
+                this.uiManager.updateSystemStatus('stt', 'IDLE');
                 this.uiManager.updateSystemStatus('tts', 'PLAYING');
                 this.uiManager.showPlaybackIndicator(true);
                 break;
                 
             case 'completed':
+                this.uiManager.updateSystemStatus('stt', 'IDLE');
                 this.uiManager.updateSystemStatus('tts', 'IDLE');
                 this.uiManager.showPlaybackIndicator(false);
                 break;
@@ -272,12 +295,55 @@ class VoiceConverter {
             case 'error':
                 this.uiManager.updateButtonState('ready');
                 this.uiManager.updateSystemStatus('stt', 'ERROR');
-                this.uiManager.updateSystemStatus('voice', 'ERROR');
+                this.uiManager.updateSystemStatus('tts', 'ERROR');
                 break;
         }
         
         // 전체 상태 업데이트
         this.updateOverallStatus();
+    }
+    
+    /**
+     * STT 결과 처리
+     * @param {number} sessionId 
+     * @param {Object} sttResult 
+     */
+    handleSTTResult(sessionId, sttResult) {
+        if (sttResult && sttResult.transcription) {
+            console.log(`📝 STT 결과 (세션: ${sessionId}): "${sttResult.transcription}"`);
+            this.uiManager.showToast(`🎯 인식된 텍스트: "${sttResult.transcription}"`, 'success');
+            this.uiManager.updateSystemStatus('stt', 'IDLE');
+            this.uiManager.updateSystemStatus('tts', 'PROCESSING');
+        } else {
+            console.log(`❌ STT 실패 (세션: ${sessionId})`);
+            this.uiManager.showToast('음성 인식에 실패했습니다.', 'error');
+        }
+    }
+    
+    /**
+     * TTS 상태 처리
+     * @param {number} sessionId 
+     * @param {string} status 
+     */
+    handleTTSStatus(sessionId, status) {
+        console.log(`🔊 TTS 상태 업데이트 (세션: ${sessionId}): ${status}`);
+        
+        switch (status) {
+            case 'processing':
+                this.uiManager.showToast('🔊 텍스트를 음성으로 변환 중...', 'info');
+                this.uiManager.updateSystemStatus('tts', 'PROCESSING');
+                break;
+                
+            case 'completed':
+                this.uiManager.showToast('✅ 음성 변환 완료!', 'success');
+                this.uiManager.updateSystemStatus('tts', 'PLAYING');
+                break;
+                
+            case 'error':
+                this.uiManager.showToast('❌ 음성 합성에 실패했습니다.', 'error');
+                this.uiManager.updateSystemStatus('tts', 'ERROR');
+                break;
+        }
     }
     
     /**
@@ -292,25 +358,38 @@ class VoiceConverter {
     }
     
     /**
-     * 오디오 수신 및 재생 처리
+     * 변환된 오디오 수신 및 재생 처리
      * @param {number} sessionId 
      * @param {ArrayBuffer} audioData 
      */
     async handleAudioReceived(sessionId, audioData) {
-        console.log(`🔊 오디오 재생 시작 (세션: ${sessionId})`);
+        console.log(`🔊 변환된 음성 재생 시작 (세션: ${sessionId})`);
         
         try {
+            // 재생 상태 업데이트
+            this.uiManager.updateSystemStatus('tts', 'PLAYING');
+            this.uiManager.showPlaybackIndicator(true);
+            
+            // 오디오 재생
             await this.uiManager.playAudio(audioData);
-            console.log(`✅ 오디오 재생 완료 (세션: ${sessionId})`);
+            console.log(`✅ 변환된 음성 재생 완료 (세션: ${sessionId})`);
             
             // 세션 완료 처리
             this.sessionManager.completeSession(sessionId);
-            this.uiManager.showToast(`음성 변환 완료! (세션: ${sessionId})`, 'success');
+            this.uiManager.showToast(`🎉 음성 변환 완료! (세션: ${sessionId})`, 'success');
+            
+            // 상태 초기화
+            this.uiManager.updateSystemStatus('tts', 'IDLE');
+            this.uiManager.showPlaybackIndicator(false);
             
         } catch (error) {
-            console.error(`❌ 오디오 재생 오류 (세션: ${sessionId}):`, error);
+            console.error(`❌ 변환된 음성 재생 오류 (세션: ${sessionId}):`, error);
             this.sessionManager.handleSessionError(sessionId);
-            this.uiManager.showToast('오디오 재생 중 오류가 발생했습니다.', 'error');
+            this.uiManager.showToast('변환된 음성 재생 중 오류가 발생했습니다.', 'error');
+            
+            // 에러 상태 업데이트
+            this.uiManager.updateSystemStatus('tts', 'ERROR');
+            this.uiManager.showPlaybackIndicator(false);
         }
     }
     
@@ -321,6 +400,11 @@ class VoiceConverter {
     handleSessionError(sessionId) {
         console.error(`❌ 세션 에러 (세션: ${sessionId})`);
         this.uiManager.showToast(`세션 ${sessionId}에서 오류가 발생했습니다.`, 'error');
+        
+        // 에러 상태로 UI 업데이트
+        this.uiManager.updateSystemStatus('stt', 'ERROR');
+        this.uiManager.updateSystemStatus('tts', 'ERROR');
+        this.uiManager.showPlaybackIndicator(false);
     }
     
     /**
@@ -329,6 +413,7 @@ class VoiceConverter {
     updateOverallStatus() {
         const playingCount = this.sessionManager.getSessionCountByStatus('playing');
         const processingCount = this.sessionManager.getSessionCountByStatus('processing');
+        const convertingCount = this.sessionManager.getSessionCountByStatus('converting');
         
         // 재생 인디케이터 업데이트
         this.uiManager.showPlaybackIndicator(playingCount > 0);
@@ -336,7 +421,7 @@ class VoiceConverter {
         // 로그 출력
         const totalSessions = this.sessionManager.getActiveSessionCount();
         const poolStatus = this.sessionManager.getPoolStatus();
-        console.log(`📊 상태 업데이트 - 총 세션: ${totalSessions}, 재생중: ${playingCount}, 처리중: ${processingCount}, 풀 상태: ${poolStatus.available}/${poolStatus.total}`);
+        console.log(`📊 상태 업데이트 - 총 세션: ${totalSessions}, 재생중: ${playingCount}, STT 처리중: ${processingCount}, TTS 변환중: ${convertingCount}, 풀 상태: ${poolStatus.available}/${poolStatus.total}`);
     }
     
     /**
@@ -359,7 +444,6 @@ class VoiceConverter {
      * 디버그 정보 출력
      */
     getDebugInfo() {
-        // 디버그 정보에 풀 준비 상태 추가
         return {
             isPoolReady: this.isPoolReady,
             activeSessions: this.sessionManager.getActiveSessionCount(),
@@ -370,7 +454,8 @@ class VoiceConverter {
                 status: s.status,
                 createdAt: s.createdAt
             })),
-            uiConnected: this.uiManager.isConnected
+            uiConnected: this.uiManager.isConnected,
+            pipeline: 'STT→TTS'  // 파이프라인 정보 추가
         };
     }
 }
@@ -380,7 +465,7 @@ let voiceConverter;
 
 // 페이지 로드 시 초기화
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('📄 DOM 로드 완료, VoiceConverter 초기화...');
+    console.log('📄 DOM 로드 완료, VoiceConverter (STT→TTS) 초기화...');
     voiceConverter = new VoiceConverter();
     
     // 전역 디버그 함수 등록

@@ -1,4 +1,4 @@
-# services/webservder/src/routes/websocket.py
+# services/webserver/src/routes/websocket.py (proto 파일 매칭 버전)
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
 import json
@@ -7,8 +7,8 @@ import io
 import wave
 import logging
 
-# gRPC 클라이언트 임포트
-from .grpc_client import get_stt_client, cleanup_stt_client
+# gRPC 클라이언트 임포트 (수정된 버전)
+from .grpc_client import get_stt_client, get_tts_client, cleanup_grpc_clients
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -74,32 +74,27 @@ manager = ConnectionManager()
 
 @router.websocket("/audio")
 async def websocket_audio(websocket: WebSocket):
-    """실시간 음성 데이터 처리"""
+    """실시간 음성 데이터 처리 (STT→TTS 파이프라인)"""
     session: Optional[Session] = None
     session_id = None
     
     try:
         # 초기 연결 수락
         await websocket.accept()
-        logger.info("🔗 WebSocket 연결 수락됨 - 커넥션 풀 방식 지원")
+        logger.info("🔗 WebSocket 연결 수락됨")
         
-        # 커넥션 풀 방식: 연결만 하고 세션 시작 메시지를 기다림 (타임아웃 없음)
-        # 첫 번째 메시지가 올 때까지 대기 (커넥션 풀에서는 나중에 메시지가 옴)
+        # 세션 시작 메시지 대기
         while True:
             try:
                 message = await websocket.receive()
-                logger.info(f"🔍 메시지 수신: {message}")
                 
-                # WebSocket 연결 해제 메시지 확인
                 if message.get('type') == 'websocket.disconnect':
-                    logger.info(f"🔌 클라이언트 연결 종료: code={message.get('code')}, reason={message.get('reason')}")
+                    logger.info(f"🔌 클라이언트 연결 종료")
                     return
                 
                 if 'text' in message:
-                    logger.info(f"📝 텍스트 메시지 내용: {message['text']}")
                     try:
                         data = json.loads(message['text'])
-                        logger.info(f"🔍 파싱된 데이터: {data}")
                     except json.JSONDecodeError as je:
                         logger.error(f"❌ JSON 파싱 실패: {je}")
                         await websocket.send_text(json.dumps({
@@ -109,13 +104,10 @@ async def websocket_audio(websocket: WebSocket):
                         continue
                     
                     message_type = data.get('type')
-                    logger.info(f"📋 메시지 타입: {message_type}")
                     
                     if message_type == 'session_start':
                         session_id = data.get('session_id')
-                        logger.info(f"📋 세션 시작 요청: {session_id}")
                         
-                        # 세션 ID 유효성 검사
                         if session_id is None:
                             logger.error("❌ session_id가 제공되지 않음")
                             await websocket.send_text(json.dumps({
@@ -124,7 +116,7 @@ async def websocket_audio(websocket: WebSocket):
                             }))
                             continue
                         
-                        # 기존 세션 ID 중복 체크
+                        # 기존 세션 중복 체크
                         if session_id in manager.sessions:
                             logger.warning(f"⚠️ 중복된 세션 ID: {session_id}, 기존 세션 종료")
                             try:
@@ -145,17 +137,17 @@ async def websocket_audio(websocket: WebSocket):
                         }))
                         
                         logger.info(f"✅ 세션 {session_id} 등록 완료")
-                        break  # 세션 초기화 완료, 메인 루프로 진행
+                        break
                         
                     else:
                         logger.warning(f"⚠️ 세션 초기화 전 다른 메시지 수신: {message_type}")
                         await websocket.send_text(json.dumps({
                             "type": "error",
-                            "message": "세션을 먼저 시작해주세요 (session_start 메시지 필요)"
+                            "message": "세션을 먼저 시작해주세요"
                         }))
                         
                 elif 'bytes' in message:
-                    logger.warning(f"⚠️ 세션 초기화 전 바이너리 데이터 수신 (크기: {len(message['bytes'])} bytes)")
+                    logger.warning(f"⚠️ 세션 초기화 전 바이너리 데이터 수신")
                     await websocket.send_text(json.dumps({
                         "type": "error",
                         "message": "세션을 먼저 시작해주세요"
@@ -213,62 +205,50 @@ async def websocket_audio(websocket: WebSocket):
         logger.info(f"🔌 WebSocket 연결 끊어짐 (세션: {session_id})")
     except Exception as e:
         logger.error(f"❌ WebSocket 오류 (세션: {session_id}): {e}")
-        try:
-            # WebSocket 상태 확인 후 메시지 전송
-            if session and hasattr(websocket, 'client_state') and websocket.client_state.value == 1:  # CONNECTED
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "session_id": session_id,
-                    "message": f"서버 오류: {str(e)}"
-                }))
-        except Exception as send_error:
-            logger.debug(f"💭 에러 메시지 전송 건너뜀 (연결 이미 종료됨): {send_error}")
     finally:
         if session_id:
             manager.disconnect_session(session_id)
         try:
-            # WebSocket이 아직 열려있는 경우에만 닫기
-            if hasattr(websocket, 'client_state') and websocket.client_state.value not in [3, 4]:  # DISCONNECTED, CLOSED가 아닌 경우
+            if hasattr(websocket, 'client_state') and websocket.client_state.value not in [3, 4]:
                 await websocket.close()
         except Exception as close_error:
-            logger.debug(f"💭 WebSocket 종료 건너뜀 (이미 종료됨): {close_error}")
+            logger.debug(f"💭 WebSocket 종료 건너뜀: {close_error}")
 
 async def handle_control_message(session: Session, message: dict):
-    """제어 메시지 처리"""
+    """제어 메시지 처리 (STT→TTS 파이프라인)"""
     msg_type = message.get('type')
     session_id = session.session_id
     
     logger.info(f"📨 제어 메시지 수신: {msg_type} (세션: {session_id})")
     
     if msg_type == 'recording_resumed':
-        # 녹음 재개
         session.status = 'recording'
         logger.info(f"🔄 녹음 재개 (세션: {session_id})")
         
     elif msg_type == 'recording_finished':
-        # 녹음 완료 - STT 처리 시작
+        # 녹음 완료 - STT → TTS 파이프라인 시작
         session.status = 'processing'
         
         if session.audio_buffer:
-            logger.info(f"🔄 STT 처리 시작 (세션: {session_id})")
+            logger.info(f"🔄 STT → TTS 파이프라인 시작 (세션: {session_id})")
             
-            # 처리 중 상태 전송
+            # STT 처리 중 상태 전송
             await session.websocket.send_text(json.dumps({
                 "type": "processing",
                 "session_id": session_id,
                 "message": "음성을 텍스트로 변환 중..."
             }))
             
-            # STT 처리
+            # 1단계: STT 처리
             combined_audio = session.get_combined_audio()
             stt_result = await process_stt_conversion(session_id, combined_audio)
             
             if stt_result["success"]:
-                # STT 성공 - 변환된 텍스트를 다시 음성으로 변환
+                # STT 성공 - TTS 처리로 진행
                 transcription = stt_result["transcription"]
                 logger.info(f"🎯 STT 변환 성공 (세션: {session_id}): \"{transcription}\"")
                 
-                # TTS 처리 (현재는 임시로 원본 오디오 반환)
+                # 2단계: TTS 처리
                 session.status = 'converting'
                 await session.websocket.send_text(json.dumps({
                     "type": "converting",
@@ -276,24 +256,41 @@ async def handle_control_message(session: Session, message: dict):
                     "message": f"텍스트를 음성으로 변환 중... (인식된 텍스트: {transcription})"
                 }))
                 
-                # 임시로 WAV 형태로 변환하여 반환
-                converted_audio = create_wav_from_pcm(combined_audio, sample_rate=16000)
+                # TTS 처리 (proto 파일 매칭)
+                tts_result = await process_tts_conversion(session_id, transcription)
                 
-                # 변환된 음성 전송
-                await session.websocket.send_bytes(converted_audio)
-                logger.info(f"✅ 음성 변환 완료 (세션: {session_id})")
-                
-                # 완료 메시지 전송 (STT 결과 포함)
-                await session.websocket.send_text(json.dumps({
-                    "type": "completed",
-                    "session_id": session_id,
-                    "message": "음성 변환 완료",
-                    "stt_result": {
-                        "transcription": transcription,
-                        "confidence": stt_result.get("confidence", 0.0),
-                        "processing_time_ms": stt_result.get("processing_time_ms", 0)
-                    }
-                }))
+                if tts_result["success"]:
+                    # TTS 성공 - 생성된 오디오 전송
+                    logger.info(f"✅ TTS 변환 성공 (세션: {session_id})")
+                    
+                    # 변환된 음성 전송
+                    await session.websocket.send_bytes(tts_result["audio_data"])
+                    logger.info(f"🔊 음성 변환 완료 및 전송 (세션: {session_id})")
+                    
+                    # 완료 메시지 전송
+                    await session.websocket.send_text(json.dumps({
+                        "type": "completed",
+                        "session_id": session_id,
+                        "message": "음성 변환 완료",
+                        "stt_result": {
+                            "transcription": transcription,
+                            "confidence": stt_result.get("confidence", 0.0),
+                            "processing_time_ms": stt_result.get("processing_time_ms", 0)
+                        },
+                        "tts_result": {
+                            "processing_time_ms": tts_result.get("processing_time_ms", 0),
+                            "audio_duration_ms": tts_result.get("stats", {}).get("audio_duration_ms", 0) if tts_result.get("stats") else 0
+                        }
+                    }))
+                    
+                else:
+                    # TTS 실패
+                    logger.error(f"❌ TTS 처리 실패 (세션: {session_id}): {tts_result.get('error', '알 수 없는 오류')}")
+                    await session.websocket.send_text(json.dumps({
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": f"음성 합성 실패: {tts_result.get('error', '알 수 없는 오류')}"
+                    }))
                 
             else:
                 # STT 실패
@@ -321,46 +318,22 @@ async def process_stt_conversion(session_id: int, audio_data: bytes) -> dict:
     try:
         logger.info(f"🎤 gRPC STT 변환 시작 (세션: {session_id}, {len(audio_data)} bytes)")
         
-        # STT gRPC 클라이언트 가져오기
-        try:
-            stt_client = await get_stt_client()
-        except Exception as e:
-            logger.error(f"❌ STT 클라이언트 가져오기 실패: {e}")
+        stt_client = await get_stt_client()
+        
+        if hasattr(stt_client, 'is_connected') and not stt_client.is_connected():
+            logger.warning(f"⚠️ STT 서버에 연결되지 않음 (세션: {session_id})")
             return {
                 "success": False,
-                "error": f"STT 클라이언트 연결 실패: {str(e)}",
+                "error": "STT 서버에 연결할 수 없습니다",
                 "transcription": "",
                 "confidence": 0.0
             }
         
-        # 클라이언트 연결 상태 확인
-        try:
-            if hasattr(stt_client, 'is_connected') and not stt_client.is_connected():
-                logger.warning(f"⚠️ STT 서버에 연결되지 않음 (세션: {session_id})")
-                return {
-                    "success": False,
-                    "error": "STT 서버에 연결할 수 없습니다",
-                    "transcription": "",
-                    "confidence": 0.0
-                }
-        except Exception as e:
-            logger.warning(f"⚠️ STT 연결 상태 확인 실패: {e}")
-        
-        # gRPC STT 요청
-        try:
-            result = await stt_client.process_stt(
-                audio_data=audio_data,
-                session_id=session_id,
-                language="korean"
-            )
-        except Exception as e:
-            logger.error(f"❌ STT 요청 처리 실패: {e}")
-            return {
-                "success": False,
-                "error": f"STT 요청 실패: {str(e)}",
-                "transcription": "",
-                "confidence": 0.0
-            }
+        result = await stt_client.process_stt(
+            audio_data=audio_data,
+            session_id=session_id,
+            language="korean"
+        )
         
         if result.get("success"):
             logger.info(f"✅ gRPC STT 변환 성공 (세션: {session_id})")
@@ -379,8 +352,49 @@ async def process_stt_conversion(session_id: int, audio_data: bytes) -> dict:
             "confidence": 0.0
         }
 
+async def process_tts_conversion(session_id: int, text: str) -> dict:
+    """TTS gRPC 서버를 통한 텍스트-음성 변환 (proto 파일 매칭)"""
+    try:
+        logger.info(f"🔊 gRPC TTS 변환 시작 (세션: {session_id}, 텍스트: '{text[:50]}{'...' if len(text) > 50 else ''}')")
+        
+        tts_client = await get_tts_client()
+        
+        if hasattr(tts_client, 'is_connected') and not tts_client.is_connected():
+            logger.warning(f"⚠️ TTS 서버에 연결되지 않음 (세션: {session_id})")
+            return {
+                "success": False,
+                "error": "TTS 서버에 연결할 수 없습니다",
+                "audio_data": None
+            }
+        
+        # proto 파일 매칭된 TTS 호출
+        result = await tts_client.process_tts(
+            text=text,
+            session_id=session_id,
+            voice="female",      # proto의 voice 필드
+            language="korean",   # proto의 language 필드
+            speed=1.0,          # proto의 speed 필드
+            pitch=1.0           # proto의 pitch 필드
+        )
+        
+        if result.get("success"):
+            logger.info(f"✅ gRPC TTS 변환 성공 (세션: {session_id})")
+            logger.info(f"🔊 생성된 오디오: {len(result.get('audio_data', b''))}바이트")
+        else:
+            logger.error(f"❌ gRPC TTS 변환 실패 (세션: {session_id}): {result.get('error', '알 수 없는 오류')}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ TTS 변환 중 예외 발생 (세션: {session_id}): {e}")
+        return {
+            "success": False,
+            "error": f"TTS 변환 중 오류: {str(e)}",
+            "audio_data": None
+        }
+
 def create_wav_from_pcm(pcm_data: bytes, sample_rate: int = 16000) -> bytes:
-    """PCM 데이터를 WAV 포맷으로 변환"""
+    """PCM 데이터를 WAV 포맷으로 변환 (백업용, TTS는 이미 WAV 형식 반환)"""
     try:
         buffer = io.BytesIO()
         
@@ -412,12 +426,18 @@ async def websocket_status(websocket: WebSocket):
                     "last_audio_time": session.last_audio_time
                 }
             
-            # STT 클라이언트 상태 확인
+            # STT, TTS 클라이언트 상태 확인
             try:
                 stt_client = await get_stt_client()
                 stt_connected = hasattr(stt_client, 'is_connected') and stt_client.is_connected()
             except:
                 stt_connected = False
+                
+            try:
+                tts_client = await get_tts_client()
+                tts_connected = hasattr(tts_client, 'is_connected') and tts_client.is_connected()
+            except:
+                tts_connected = False
             
             status = {
                 "type": "status",
@@ -427,7 +447,8 @@ async def websocket_status(websocket: WebSocket):
                 "server_info": {
                     "active_connections": len(manager.status_connections),
                     "uptime": asyncio.get_event_loop().time(),
-                    "stt_connected": stt_connected
+                    "stt_connected": stt_connected,
+                    "tts_connected": tts_connected
                 }
             }
             
@@ -455,17 +476,24 @@ async def get_active_sessions():
             "last_audio_time": session.last_audio_time
         })
     
-    # STT 연결 상태 추가
+    # STT, TTS 연결 상태 추가
     try:
         stt_client = await get_stt_client()
         stt_connected = hasattr(stt_client, 'is_connected') and stt_client.is_connected()
     except:
         stt_connected = False
+        
+    try:
+        tts_client = await get_tts_client()
+        tts_connected = hasattr(tts_client, 'is_connected') and tts_client.is_connected()
+    except:
+        tts_connected = False
     
     return {
         "total_sessions": len(sessions),
         "sessions": sessions,
-        "stt_connected": stt_connected
+        "stt_connected": stt_connected,
+        "tts_connected": tts_connected
     }
 
 @router.delete("/sessions/{session_id}")
@@ -487,5 +515,5 @@ async def terminate_session(session_id: int):
 # async def shutdown_event():
 #     """애플리케이션 종료 시 gRPC 클라이언트 정리"""
 #     logger.info("🧹 애플리케이션 종료, gRPC 클라이언트 정리 중...")
-#     await cleanup_stt_client()
+#     await cleanup_grpc_clients()
 #     logger.info("✅ 정리 완료")
