@@ -1,96 +1,75 @@
 # services/STTserver/Dockerfile
-# UV를 사용한 의존성 설치 스테이지
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS uv
-
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_LINK_MODE=copy
+# UV를 사용한 의존성 설치 및 proto 컴파일
+FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim AS builder
 
 WORKDIR /app
 
-# 프로젝트 의존성 파일들 복사
+# 워크스페이스 루트의 의존성 파일들 복사
 COPY uv.lock pyproject.toml ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+COPY shared/ ./shared/
+COPY services/STTserver/ ./services/STTserver/
 
-# 프로토콜 버퍼 컴파일 스테이지
-FROM uv AS proto-builder
 
-# protoc 설치
-RUN apt-get update && apt-get install -y \
-    protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd --create-home --shell /bin/bash --uid 1001 appuser && \
+    chown -R appuser:appuser /app
 
-# proto 컴파일을 위한 grpcio-tools 설치
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv add grpcio-tools --no-sync
+# appuser로 전환하여 의존성 설치
+USER appuser
 
-# proto 파일 복사 및 컴파일 (현재 디렉토리의 proto 폴더 사용)
-COPY proto/ ./proto/
-RUN mkdir -p ./src && \
+RUN uv sync --frozen --no-dev && \
     uv run python -m grpc_tools.protoc \
-        --python_out=./src \
-        --grpc_python_out=./src \
-        --proto_path=./proto \
-        ./proto/audio_service.proto
+        --python_out=./services/STTserver/src \
+        --grpc_python_out=./services/STTserver/src \
+        --proto_path=./shared/proto \
+        ./shared/proto/audio_service.proto
+
 
 # 최종 실행 이미지 (CUDA 지원)
 FROM nvidia/cuda:12.5.1-runtime-ubuntu22.04
 
+# uv 바이너리 복사
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
 # 메타데이터
-LABEL maintainer="your-team@company.com"
-LABEL description="CUDA-enabled audio processing service"
+LABEL maintainer="lghmk2@gmail.com"
+LABEL description="CUDA-enabled STT service"
 
 # 환경 변수 설정
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-# 시스템 의존성 설치 및 사용자 생성
+# 시스템 의존성 설치 및 사용자 생성  
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3.11 \
-        python3.11-distutils \
-        ffmpeg \
-        curl \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
-    && useradd --create-home --shell /bin/bash --uid 1001 appuser
+        python3 \
+        ffmpeg && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd --create-home --shell /bin/bash --uid 1001 appuser && \
+    ln -sf /usr/bin/python3 /usr/local/bin/python
 
 WORKDIR /app
 
-# UV 가상환경 복사
-COPY --from=uv --chown=appuser:appuser /app/.venv /app/.venv
+# 전체 앱 디렉토리 복사 (의존성, shared 모듈, 소스 코드, proto 파일 포함)
+COPY --from=builder --chown=appuser:appuser /app /app
 
-# 프로젝트 파일들 복사
-COPY --chown=appuser:appuser src/ /app/src/
-COPY --chown=appuser:appuser . /app/
-COPY --chown=appuser:appuser scripts/ /app/scripts/
-
-# proto 생성 파일들 복사 (proto-builder 스테이지에서)
-COPY --from=proto-builder --chown=appuser:appuser /app/src/audio_service_pb2.py /app/src/
-COPY --from=proto-builder --chown=appuser:appuser /app/src/audio_service_pb2_grpc.py /app/src/
-
-# 모델 및 로그 디렉토리 생성
-RUN mkdir -p /app/models /app/logs && \
-    chown -R appuser:appuser /app/models /app/logs
+# models 디렉토리 생성
+RUN mkdir -p /app/models && \
+    chown -R appuser:appuser /app/models
 
 USER appuser
 
-# 환경 변수 설정
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app/src:/app"
+# 환경 변수 설정 (사용자 전환 후)
+ENV PYTHONPATH="/app/services/STTserver/src"
+ENV HF_HOME=/app/models
+ENV CUDA_VISIBLE_DEVICES=0
 
 # 포트 노출
 EXPOSE 50051
 
-# 헬스 체크
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
-    CMD python /app/scripts/healthcheck.py || exit 1
-
-# 볼륨 설정
-VOLUME ["/app/models", "/app/logs"]
-
 # 애플리케이션 실행
-CMD ["python", "/app/src/server.py"]
+WORKDIR /app/services/STTserver
+ENTRYPOINT ["uv", "run", "python", "src/server.py"]

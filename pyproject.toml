@@ -1,0 +1,31 @@
+# pyproject.toml
+[tool.uv.workspace]
+members = [
+    "shared/miniflow",
+    "services/webserver",
+    "services/STTserver",
+]
+
+# 전체 워크스페이스 공통 개발 의존성
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0"
+]
+
+# 공통 도구 설정
+[tool.black]
+line-length = 88
+target-version = ['py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+select = ["E", "F", "I", "N", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true

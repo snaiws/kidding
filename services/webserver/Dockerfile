@@ -1,72 +1,62 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS uv
-
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_LINK_MODE=copy
+# services/webserver/Dockerfile
+# UV를 사용한 의존성 설치 및 proto 컴파일
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 WORKDIR /app
 
-# 프로젝트 루트의 파일들 복사
+# 워크스페이스 루트의 의존성 파일들 복사
 COPY uv.lock pyproject.toml ./
+COPY shared/ ./shared/
+COPY services/webserver/ ./services/webserver/
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-dev
 
-# Proto 컴파일 스테이지
-FROM uv AS proto-builder
-
-# protoc 설치
-RUN apt-get update && apt-get install -y \
-    protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
-
-# proto 컴파일을 위한 grpcio-tools 설치
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv add grpcio-tools --no-sync
-
-# proto 파일 복사 및 컴파일 (현재 webserver의 proto 폴더 사용)
-COPY proto/ ./proto/
-RUN mkdir -p . && \
-    echo "Proto 파일 확인:" && ls -la ./proto/ && \
-    echo "Proto 컴파일 시작..." && \
+# protoc 설치 및 proto 컴파일
+RUN apt-get update && \
+    apt-get install -y protobuf-compiler && \
+    mkdir -p ./services/webserver/src && \
     uv run python -m grpc_tools.protoc \
-        --python_out=. \
-        --grpc_python_out=. \
-        --proto_path=./proto \
-        ./proto/audio_service.proto && \
-    echo "Proto 컴파일 완료" && \
-    ls -la ./audio_service_pb2*
+        --python_out=./services/webserver/src \
+        --grpc_python_out=./services/webserver/src \
+        --proto_path=./shared/proto \
+        ./shared/proto/audio_service.proto && \
+    rm -rf /var/lib/apt/lists/*
 
+# 최종 실행 이미지 
 FROM python:3.12-slim-bookworm
 
 # 메타데이터
-LABEL maintainer="your-team@company.com"
-LABEL description="CUDA-enabled audio processing service"
+LABEL maintainer="lghmk2@gmail.com"
+LABEL description="kidding webserver"
 
+# 환경 변수 설정
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# 시스템 의존성 설치 및 사용자 생성
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/* && \
-    useradd --create-home --shell /bin/bash appuser
+    useradd --create-home --shell /bin/bash --uid 1001 appuser
 
 WORKDIR /app
 
-# .venv 복사 (uv 스테이지에서)
-COPY --from=uv --chown=appuser:appuser /app/.venv /app/.venv
+# 전체 앱 디렉토리 복사 (의존성, shared 모듈, 소스 코드, proto 파일 포함)
+COPY --from=builder --chown=appuser:appuser /app /app
 
-# 프로젝트 파일들 복사
-COPY --chown=appuser:appuser src/ /app/src/
-COPY --chown=appuser:appuser . /app/
-
-# proto 생성 파일들 복사 (proto-builder 스테이지에서) - 루트로 복사
-COPY --from=proto-builder --chown=appuser:appuser /app/audio_service_pb2.py /app/
-COPY --from=proto-builder --chown=appuser:appuser /app/audio_service_pb2_grpc.py /app/
+# src 디렉토리로 워킹 디렉토리 변경
+WORKDIR /app/services/webserver
 
 USER appuser
 
+# 환경 변수 설정 (사용자 전환 후)
 ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app:/app/src"
+ENV PYTHONPATH="/app/services/webserver/src"
 
+# 포트 노출
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
+# 애플리케이션 실행
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
